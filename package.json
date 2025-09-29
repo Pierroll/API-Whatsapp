@@ -1,0 +1,32 @@
+{
+  "name": "whatsappv2",
+  "version": "1.0.0",
+  "description": "",
+  "type": "commonjs",
+  "main": "lib/app.js",
+  "scripts": {
+    "dev": "node ./src/app.js",
+    "start": "node ./src/app.js",
+    "cleanup": "node scripts/cleanup-session.js"
+
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "packageManager": "pnpm@10.17.1",
+  "dependencies": {
+    "@bot-whatsapp/bot": "0.1.38",
+    "@bot-whatsapp/database": "0.1.38",
+    "@bot-whatsapp/provider-baileys": "0.1.0-alpha.18",
+    "baileys": "7.0.0-rc.4",
+    "body-parser": "^2.2.0",
+    "dotenv": "^17.2.2",
+    "polka": "^0.5.2",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.2"
+  }
+}
