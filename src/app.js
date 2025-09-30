@@ -1,4 +1,4 @@
-// src/app.js - WhatsApp Bot API con Polka + Login para ver QR
+// src/app.js - WhatsApp Bot API con Polka + Login para ver QR + Envío de PDF
 require('dotenv').config();
 
 const crypto = require('crypto');
@@ -11,7 +11,7 @@ const { DisconnectReason, useMultiFileAuthState } = require('baileys');
 const qrcode = require('qrcode');
 const fs = require('fs');
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3002; // <-- cambiado a 3002
 const API_KEY = process.env.API_KEY || 'tu-api-key-secreta-aqui';
 
 // ---- Login para QR ----
@@ -89,6 +89,65 @@ function requireLogin(req, res, next) {
   res.statusCode = 302;
   res.setHeader('Location', '/login?msg=login');
   res.end();
+}
+
+// ---- helpers para PDF ----
+async function fetchBufferFromUrl(url) {
+  // Node >= 18 tiene fetch global
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`No se pudo descargar el PDF (${res.status})`);
+  const ab = await res.arrayBuffer();
+  return Buffer.from(ab);
+}
+
+function parseBase64Pdf(b64) {
+  const prefix = 'data:application/pdf;base64,';
+  const clean = b64.startsWith(prefix) ? b64.slice(prefix.length) : b64;
+  try {
+    return Buffer.from(clean, 'base64');
+  } catch {
+    throw new Error('Base64 inválido para PDF');
+  }
+}
+
+function guessFilenameFromUrl(url, fallback = 'documento.pdf') {
+  try {
+    const u = new URL(url);
+    const last = (u.pathname.split('/').pop() || '').trim();
+    if (last && last.includes('.')) return last;
+  } catch {}
+  return fallback;
+}
+
+/**
+ * Recibe { url?, base64?, path?, filename?, message? } y retorna:
+ * { buffer, filename, caption }
+ */
+async function resolvePdfInput(input) {
+  const { url, base64, path, filename, message } = input || {};
+  let buffer, name = filename || 'documento.pdf';
+
+  if (url) {
+    buffer = await fetchBufferFromUrl(url);
+    if (!filename) name = guessFilenameFromUrl(url, name);
+  } else if (base64) {
+    buffer = parseBase64Pdf(base64);
+  } else if (path) {
+    if (!fs.existsSync(path)) throw new Error('Archivo local no existe');
+    buffer = fs.readFileSync(path);
+    if (!filename) name = (path.split('/').pop() || name);
+  } else {
+    throw new Error('Debes enviar "url", "base64" o "path" para el PDF');
+  }
+
+  // Validación mínima: firma %PDF
+  if (!buffer || buffer.length < 4 || buffer.slice(0,4).toString() !== '%PDF') {
+    // Tolerancia a BOM u otros bytes: miramos el primer KB
+    const str = buffer.slice(0, 1024).toString();
+    if (!str.includes('%PDF')) throw new Error('El archivo proporcionado no parece un PDF válido');
+  }
+
+  return { buffer, filename: name, caption: (message && String(message).trim()) || undefined };
 }
 
 // ---- provider personalizado (Baileys) ----
@@ -192,6 +251,19 @@ class CustomBaileysProvider {
     return true;
   }
 
+  async sendPdf(to, pdfBuffer, filename, caption) {
+    if (!this.sock || !this.isConnected) throw new Error('WhatsApp no está conectado');
+    const jid = to.includes('@s.whatsapp.net') ? to : `${to}@s.whatsapp.net`;
+    await this.sock.sendMessage(jid, {
+      document: pdfBuffer,
+      mimetype: 'application/pdf',
+      fileName: filename,
+      caption: caption // puede ser undefined (mensaje opcional)
+    });
+    console.log(`📤 PDF enviado a ${to} (${filename})`);
+    return true;
+  }
+
   getMessageHistory() { return this.messageHistory; }
 }
 
@@ -232,8 +304,9 @@ async function initBot() {
 
 // ---- app (Polka) ----
 const app = polka();
-app.use(json());
-app.use(urlencoded({ extended: false }));
+// Aumentamos límites para poder recibir PDFs en base64 grandes
+app.use(json({ limit: '25mb' }));
+app.use(urlencoded({ extended: false, limit: '25mb' }));
 
 // Health (sin API key)
 app.get('/health', (req, res) => ok(res, {
@@ -356,6 +429,34 @@ app.post('/api/send', authenticateAPI, async (req, res) => {
   }
 });
 
+// Enviar PDF (API key) - PDF obligatorio, mensaje opcional
+app.post('/api/send-pdf', authenticateAPI, async (req, res) => {
+  try {
+    if (!botInstance?.isConnected) {
+      return send(res, 503, { error: 'WhatsApp no está conectado', status: connectionStatus });
+    }
+
+    const { to, url, base64, path, filename, message } = req.body || {};
+    if (!to) return bad(res, { error: 'Campo requerido: to' });
+
+    // Resolvemos buffer + nombre
+    const { buffer, filename: finalName, caption } = await resolvePdfInput({ url, base64, path, filename, message });
+
+    await botInstance.sendPdf(to, buffer, finalName, caption);
+    return ok(res, {
+      success: true,
+      message: 'PDF enviado',
+      to,
+      filename: finalName,
+      hasMessage: !!caption,
+      timestamp: new Date()
+    });
+  } catch (e) {
+    console.error('Error /api/send-pdf:', e);
+    return error(res, { error: 'Error enviando PDF', details: e.message });
+  }
+});
+
 // Historial (API key)
 app.get('/api/messages', authenticateAPI, (req, res) => {
   const limit = parseInt(req.query?.limit || '50', 10);
@@ -388,7 +489,8 @@ app.get('/', (req, res) => {
       <li><b>GET</b> /qr-view → <i>ver QR (requiere login)</i></li>
       <li><b>GET</b> /api/status (API Key)</li>
       <li><b>GET</b> /api/qr (login)</li>
-      <li><b>POST</b> /api/send (API Key)</li>
+      <li><b>POST</b> /api/send (API Key) → Enviar texto</li>
+      <li><b>POST</b> /api/send-pdf (API Key) → Enviar PDF (mensaje opcional)</li>
       <li><b>GET</b> /api/messages (API Key)</li>
       <li><b>POST</b> /api/logout (API Key)</li>
     </ul>
