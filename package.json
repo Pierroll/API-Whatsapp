@@ -3,26 +3,31 @@
   "version": "1.0.0",
   "description": "",
   "type": "commonjs",
+  "engines": {
+    "node": ">=18.18"
+  },
   "main": "lib/app.js",
   "scripts": {
     "dev": "node ./src/app.js",
     "start": "node ./src/app.js",
     "cleanup": "node scripts/cleanup-session.js"
-
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "packageManager": "pnpm@10.17.1",
   "dependencies": {
-    "@bot-whatsapp/bot": "0.1.38",
+    "@bot-whatsapp/bot": "^0.1.38",
     "@bot-whatsapp/database": "0.1.38",
     "@bot-whatsapp/provider-baileys": "0.1.0-alpha.18",
-    "baileys": "7.0.0-rc.4",
+    "@whiskeysockets/baileys": "^6.7.20",
+    "baileys": "6.7.20",
     "body-parser": "^2.2.0",
     "dotenv": "^17.2.2",
+    "pino": "^10.1.0",
     "polka": "^0.5.2",
-    "qrcode": "^1.5.4"
+    "qrcode": "^1.5.4",
+    "whatsapp-web.js": "^1.34.1"
   },
   "devDependencies": {
     "@types/node": "^24.5.2",

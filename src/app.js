@@ -1,25 +1,32 @@
-// src/app.js - WhatsApp Bot API con Polka + Login para ver QR + Envío de PDF
+// src/app.js - WhatsApp Bot API con Polka (Solo Baileys, sin flows)
 require('dotenv').config();
 
 const crypto = require('crypto');
 const polka = require('polka');
 const { json, urlencoded } = require('body-parser');
-const botWhatsapp = require('@bot-whatsapp/bot');
-const MockAdapter = require('@bot-whatsapp/database/mock');
-const makeWASocket = require('baileys').default;
-const { DisconnectReason, useMultiFileAuthState } = require('baileys');
+const {
+  default: makeWASocket,
+  DisconnectReason,
+  useMultiFileAuthState,
+  fetchLatestBaileysVersion,
+} = require('@whiskeysockets/baileys');
+
 const qrcode = require('qrcode');
 const fs = require('fs');
+const pino = require('pino');
 
-const PORT = process.env.PORT || 3002; // <-- cambiado a 3002
+const PORT = process.env.PORT || 3005;
 const API_KEY = process.env.API_KEY || 'tu-api-key-secreta-aqui';
+
+// Logger silencioso (reduce spam de Baileys)
+const logger = pino({ level: 'error' });
 
 // ---- Login para QR ----
 const QR_LOGIN_USER = process.env.QR_LOGIN_USER || 'admin';
 const QR_LOGIN_PASS = process.env.QR_LOGIN_PASS || 'cambialo';
 const COOKIE_SECRET = process.env.COOKIE_SECRET || process.env.API_KEY || 'cambia-este-secreto';
 const COOKIE_NAME   = 'qr_session';
-const COOKIE_TTL_MS = 30 * 60 * 1000; // 30 min
+const COOKIE_TTL_MS = 30 * 60 * 1000;
 
 function sign(data) {
   return crypto.createHmac('sha256', COOKIE_SECRET).update(data).digest('hex');
@@ -67,16 +74,18 @@ function error(res, obj) { send(res, 500, obj); }
 // ---- estado global ----
 let botInstance = null;
 let qrCodeData = null;
-let connectionStatus = 'disconnected'; // disconnected | connecting | connected | qr_ready
+let connectionStatus = 'disconnected';
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 5;
 
-// ---- auth API key (para endpoints privados) ----
+// ---- auth API key ----
 function authenticateAPI(req, res, next) {
   const apiKey = req.headers['x-api-key'] || (req.query && req.query.apiKey);
   if (apiKey !== API_KEY) return unauthorized(res, { error: 'API Key inválida' });
   next();
 }
 
-// ---- auth login (para ver QR) ----
+// ---- auth login ----
 function requireLogin(req, res, next) {
   if (connectionStatus === 'connected') {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
@@ -93,7 +102,6 @@ function requireLogin(req, res, next) {
 
 // ---- helpers para PDF ----
 async function fetchBufferFromUrl(url) {
-  // Node >= 18 tiene fetch global
   const res = await fetch(url);
   if (!res.ok) throw new Error(`No se pudo descargar el PDF (${res.status})`);
   const ab = await res.arrayBuffer();
@@ -119,10 +127,6 @@ function guessFilenameFromUrl(url, fallback = 'documento.pdf') {
   return fallback;
 }
 
-/**
- * Recibe { url?, base64?, path?, filename?, message? } y retorna:
- * { buffer, filename, caption }
- */
 async function resolvePdfInput(input) {
   const { url, base64, path, filename, message } = input || {};
   let buffer, name = filename || 'documento.pdf';
@@ -140,9 +144,7 @@ async function resolvePdfInput(input) {
     throw new Error('Debes enviar "url", "base64" o "path" para el PDF');
   }
 
-  // Validación mínima: firma %PDF
   if (!buffer || buffer.length < 4 || buffer.slice(0,4).toString() !== '%PDF') {
-    // Tolerancia a BOM u otros bytes: miramos el primer KB
     const str = buffer.slice(0, 1024).toString();
     if (!str.includes('%PDF')) throw new Error('El archivo proporcionado no parece un PDF válido');
   }
@@ -150,11 +152,10 @@ async function resolvePdfInput(input) {
   return { buffer, filename: name, caption: (message && String(message).trim()) || undefined };
 }
 
-// ---- provider personalizado (Baileys) ----
-class CustomBaileysProvider {
+// ---- Provider Baileys ----
+class BaileysProvider {
   constructor() {
     this.sock = null;
-    this.callbacks = new Map();
     this.isConnected = false;
     this.messageHistory = [];
   }
@@ -165,10 +166,17 @@ class CustomBaileysProvider {
       connectionStatus = 'connecting';
 
       const { state, saveCreds } = await useMultiFileAuthState('./auth_info_baileys');
+      
+      // Obtener la versión más reciente de Baileys
+      const { version } = await fetchLatestBaileysVersion();
+      console.log('📦 Usando versión de Baileys:', version.join('.'));
 
       this.sock = makeWASocket({
+        version,
         auth: state,
+        logger,
         printQRInTerminal: false,
+        generateHighQualityLinkPreview: true,
       });
 
       this.sock.ev.on('creds.update', saveCreds);
@@ -178,7 +186,8 @@ class CustomBaileysProvider {
 
         if (qr) {
           connectionStatus = 'qr_ready';
-          console.log('📱 QR generado');
+          reconnectAttempts = 0;
+          console.log('📱 QR generado - escanéalo en 60s');
           try {
             qrCodeData = await qrcode.toDataURL(qr);
             await qrcode.toFile('./qr-code.png', qr);
@@ -196,15 +205,23 @@ class CustomBaileysProvider {
           const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
           if (statusCode === DisconnectReason.loggedOut) {
-            console.log('🚪 Sesión cerrada');
+            console.log('🚪 Sesión cerrada por usuario');
+            reconnectAttempts = 0;
           } else if (shouldReconnect) {
-            console.log('🔄 Reconectando en 5s...');
-            setTimeout(() => this.connect(), 5000);
+            reconnectAttempts++;
+            if (reconnectAttempts <= MAX_RECONNECT_ATTEMPTS) {
+              const delay = Math.min(5000 * reconnectAttempts, 30000);
+              console.log(`🔄 Reconectando en ${delay/1000}s (intento ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
+              setTimeout(() => this.connect(), delay);
+            } else {
+              console.log('❌ Max reconexiones alcanzado. Limpia la sesión con POST /api/logout');
+            }
           }
         } else if (connection === 'open') {
           this.isConnected = true;
           connectionStatus = 'connected';
           qrCodeData = null;
+          reconnectAttempts = 0;
           console.log('✅ WhatsApp conectado!');
         }
       });
@@ -230,18 +247,16 @@ class CustomBaileysProvider {
         if (this.messageHistory.length > 100) this.messageHistory.shift();
 
         console.log(`📨 ${entry.name}: "${text}"`);
-        this.callbacks.forEach((cb) => {
-          try { cb(entry); } catch (e) { console.error('Error en callback:', e); }
-        });
       });
     } catch (e) {
-      console.error('❌ Error conectando:', e);
+      console.error('❌ Error conectando:', e.message);
       connectionStatus = 'error';
-      setTimeout(() => this.connect(), 10000);
+      reconnectAttempts++;
+      if (reconnectAttempts <= MAX_RECONNECT_ATTEMPTS) {
+        setTimeout(() => this.connect(), 5000);
+      }
     }
   }
-
-  on(event, callback) { this.callbacks.set(event, callback); }
 
   async sendMessage(to, message) {
     if (!this.sock || !this.isConnected) throw new Error('WhatsApp no está conectado');
@@ -258,7 +273,7 @@ class CustomBaileysProvider {
       document: pdfBuffer,
       mimetype: 'application/pdf',
       fileName: filename,
-      caption: caption // puede ser undefined (mensaje opcional)
+      caption: caption
     });
     console.log(`📤 PDF enviado a ${to} (${filename})`);
     return true;
@@ -270,59 +285,28 @@ class CustomBaileysProvider {
 // ---- init bot ----
 async function initBot() {
   console.log('🚀 Iniciando Bot de WhatsApp...');
-
-  const { createBot, createFlow, addKeyword } = botWhatsapp;
-
-  const flowWelcome = addKeyword(['hola', 'buenas', 'hi', 'hello'])
-    .addAnswer('¡Hola! 👋 Soy tu bot de WhatsApp')
-    .addAnswer('Escribe "ayuda" para ver los comandos disponibles');
-
-  const flowInfo = addKeyword(['info', 'información'])
-    .addAnswer('ℹ️ *Bot de WhatsApp API*')
-    .addAnswer('Versión: 1.0.0')
-    .addAnswer('Estado: ✅ Funcionando');
-
-  const flowHelp = addKeyword(['ayuda', 'help', 'comandos'])
-    .addAnswer('🆘 *Comandos Disponibles*')
-    .addAnswer('• hola → Saludo')
-    .addAnswer('• info → Información')
-    .addAnswer('• ayuda → Esta lista');
-
-  const provider = new CustomBaileysProvider();
-  const database = new MockAdapter();
-
-  await createBot({
-    flow: createFlow([flowWelcome, flowInfo, flowHelp]),
-    provider,
-    database,
-  });
-
-  botInstance = provider;
+  const provider = new BaileysProvider();
   await provider.connect();
-  return provider;
+  botInstance = provider;
 }
 
 // ---- app (Polka) ----
 const app = polka();
-// Aumentamos límites para poder recibir PDFs en base64 grandes
 app.use(json({ limit: '25mb' }));
 app.use(urlencoded({ extended: false, limit: '25mb' }));
 
-// Health (sin API key)
 app.get('/health', (req, res) => ok(res, {
   status: 'ok',
   uptime: process.uptime(),
   whatsapp: connectionStatus,
 }));
 
-// Estado (API key)
 app.get('/api/status', authenticateAPI, (req, res) => ok(res, {
   status: connectionStatus,
   isConnected: !!botInstance?.isConnected,
   qrAvailable: qrCodeData !== null,
 }));
 
-// ---------- Login para ver QR ----------
 app.get('/login', (req, res) => {
   const msg = (req.query && req.query.msg) ? String(req.query.msg) : '';
   const note = msg === 'bad' ? 'Credenciales inválidas' :
@@ -357,7 +341,6 @@ app.post('/login', (req, res) => {
     const token = makeToken(user);
     res.setHeader('Set-Cookie',
       `${COOKIE_NAME}=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.floor(COOKIE_TTL_MS/1000)}`
-      // añade "; Secure" si sirves por HTTPS
     );
     res.statusCode = 302;
     res.setHeader('Location', '/qr-view');
@@ -375,7 +358,6 @@ app.get('/logout', (_req, res) => {
   res.end();
 });
 
-// Vista QR (protegida por login)
 app.get('/qr-view', requireLogin, (req, res) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.setHeader('Cache-Control','no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
@@ -399,7 +381,6 @@ app.get('/qr-view', requireLogin, (req, res) => {
 </body></html>`);
 });
 
-// QR (SIN API key, con login)
 app.get('/api/qr', requireLogin, (req, res) => {
   if (!qrCodeData) return notfound(res, { error: 'QR no disponible', status: connectionStatus });
   res.setHeader('Cache-Control','no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
@@ -414,7 +395,6 @@ app.get('/api/qr', requireLogin, (req, res) => {
   return ok(res, { qr: qrCodeData, status: connectionStatus });
 });
 
-// Enviar mensaje (API key)
 app.post('/api/send', authenticateAPI, async (req, res) => {
   try {
     const { to, message } = req.body || {};
@@ -429,7 +409,6 @@ app.post('/api/send', authenticateAPI, async (req, res) => {
   }
 });
 
-// Enviar PDF (API key) - PDF obligatorio, mensaje opcional
 app.post('/api/send-pdf', authenticateAPI, async (req, res) => {
   try {
     if (!botInstance?.isConnected) {
@@ -439,7 +418,6 @@ app.post('/api/send-pdf', authenticateAPI, async (req, res) => {
     const { to, url, base64, path, filename, message } = req.body || {};
     if (!to) return bad(res, { error: 'Campo requerido: to' });
 
-    // Resolvemos buffer + nombre
     const { buffer, filename: finalName, caption } = await resolvePdfInput({ url, base64, path, filename, message });
 
     await botInstance.sendPdf(to, buffer, finalName, caption);
@@ -457,20 +435,19 @@ app.post('/api/send-pdf', authenticateAPI, async (req, res) => {
   }
 });
 
-// Historial (API key)
 app.get('/api/messages', authenticateAPI, (req, res) => {
   const limit = parseInt(req.query?.limit || '50', 10);
   const history = botInstance?.getMessageHistory() || [];
   return ok(res, { total: history.length, messages: history.slice(-limit) });
 });
 
-// Logout WhatsApp (API key)
 app.post('/api/logout', authenticateAPI, async (req, res) => {
   try {
     if (botInstance?.sock) await botInstance.sock.logout();
     if (fs.existsSync('./auth_info_baileys')) fs.rmSync('./auth_info_baileys', { recursive: true, force: true });
     connectionStatus = 'disconnected';
     qrCodeData = null;
+    reconnectAttempts = 0;
     ok(res, { success: true, message: 'Sesión cerrada' });
     setTimeout(() => initBot(), 2000);
   } catch (e) {
@@ -478,7 +455,6 @@ app.post('/api/logout', authenticateAPI, async (req, res) => {
   }
 });
 
-// Home
 app.get('/', (req, res) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.end(`
@@ -498,7 +474,6 @@ app.get('/', (req, res) => {
   `);
 });
 
-// Start
 async function start() {
   await initBot();
   app.listen(PORT, (err) => {

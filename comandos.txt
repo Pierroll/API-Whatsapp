@@ -1,115 +1,303 @@
-1) Preparar e iniciar en local (dev)
-# 1.1 Instalar dependencias
+WhatsApp Bot API (Polka + Baileys)
+
+Bot de WhatsApp minimalista con API REST, hecho con:
+
+Baileys
+ para conectarse a WhatsApp
+
+Polka
+ como servidor HTTP ligero
+
+Autenticación por API Key (endpoints privados) + Login por cookie para ver el QR sin exponerlo públicamente
+
+PM2 para producción
+
+⚠️ Aviso: este proyecto usa WhatsApp Web no-oficial (Baileys). Úsalo bajo tu propio criterio y respetando Términos de Uso de WhatsApp.
+
+📦 Estructura
+API-Whatsapp/
+├─ src/
+│  └─ app.js               # Servidor y lógica del bot
+├─ scripts/
+│  └─ cleanup-session.js   # Limpieza de sesión/QR/logs
+├─ ecosystem.config.js     # PM2 (producción)
+├─ package.json
+├─ .env.example
+├─ .gitignore
+└─ README.md
+
+🔧 Requisitos
+
+Node.js 18+ (recomendado 20+)
+
+pnpm (o npm/yarn)
+
+corepack enable || npm i -g pnpm
+
+🧪 1) Instalación y uso en local (desarrollo)
+1.1 Clonar e instalar
+git clone https://github.com/Pierroll/API-Whatsapp.git
+cd API-Whatsapp
 pnpm install
 
-# 1.2 Iniciar el servidor (usa PORT del .env si existe; si no, 3000)
-pnpm run dev
+1.2 Variables de entorno
 
-# 1.3 Probar health (no requiere API key)
+Usa .env (o define en ecosistema de PM2 más adelante). Copia el ejemplo:
+
+cp .env.example .env
+
+
+Valores mínimos:
+
+PORT=3000
+API_KEY=pon_aqui_tu_api_key_larga
+
+# Login para ver el QR:
+QR_LOGIN_USER=admin
+QR_LOGIN_PASS=cambialo
+COOKIE_SECRET=una_clave_secreta_larga_y_aleatoria
+
+
+TIP: genera secretos aleatorios:
+
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+
+1.3 Arrancar en dev
+pnpm run dev
+# => http://localhost:3000
+
+1.4 Flujo para vincular sesión (QR)
+
+Abre http://localhost:3000/login
+
+Ingresa usuario/clave (QR_LOGIN_USER / QR_LOGIN_PASS)
+
+Redirigirá a http://localhost:3000/qr-view (muestra el QR y refresca cada 15s)
+
+Escanea con WhatsApp → Dispositivos vinculados
+
+Una vez conectado, el bot queda activo. Si ya hay sesión, /qr-view no deja ver QR (debes cerrar sesión primero).
+
+1.5 Tests rápidos (curl)
+
+Health (público)
+
 curl http://localhost:3000/health
 
-# 1.4 Ver estado (requiere API key)
+
+Estado (API key)
+
 curl -H "X-API-Key: TU_API_KEY" http://localhost:3000/api/status
 
-# 1.5 Obtener QR en JSON (para escanear con WhatsApp)
-curl -H "X-API-Key: TU_API_KEY" http://localhost:3000/api/qr
 
-# 1.6 Obtener QR como imagen (descarga un PNG)
-curl -H "X-API-Key: TU_API_KEY" "http://localhost:3000/api/qr?format=image" --output qr.png
+Obtener QR (requiere login en navegador)
 
-# 1.7 Enviar un mensaje (formato internacional SIN +)
+JSON: http://localhost:3000/api/qr
+
+PNG: http://localhost:3000/api/qr?format=image
+
+Enviar mensaje (API key)
+
 curl -X POST http://localhost:3000/api/send \
   -H "X-API-Key: TU_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"to":"51907690125","message":"Hola!"}'
 
-# 1.8 Ver últimos mensajes que recibió el bot
+
+Historial (API key)
+
 curl -H "X-API-Key: TU_API_KEY" "http://localhost:3000/api/messages?limit=50"
 
 
-Cambia localhost:3000 por tu puerto real si usas otro (por ejemplo 3002).
+Cerrar sesión WhatsApp (API key)
 
-2) Limpiar sesión y archivos (local)
-# 2.1 Limpiar por script (borra auth_info_baileys, qr, *.log)
-pnpm run cleanup
-
-# 2.2 (Opcional) Cerrar sesión por API
 curl -X POST http://localhost:3000/api/logout \
   -H "X-API-Key: TU_API_KEY"
 
-3) Preparar y correr en producción con PM2 (VPS)
-# 3.1 Instalar dependencias en el VPS
+🚀 2) Producción con PM2 (VPS)
+
+Ejemplo en Ubuntu 24.04 con Node 20+ y puerto 3002.
+
+2.1 Preparar servidor
+# 1) Clonar
+git clone https://github.com/Pierroll/API-Whatsapp.git
+cd API-Whatsapp
+
+# 2) Instalar dependencias
 pnpm install
 
-# 3.2 Iniciar con PM2 usando tu ecosystem.config.js (ya define PORT=3002 y API_KEY)
-pm2 start ecosystem.config.js
+2.2 Configurar PM2
 
-# 3.3 Ver estado y logs
+Edita ecosystem.config.js (incluye tus variables):
+
+module.exports = {
+  apps: [
+    {
+      name: "whatsapp-api",
+      script: "src/app.js",
+      watch: false,
+      env: {
+        NODE_ENV: "production",
+        PORT: "3002",
+        API_KEY: "TU_API_KEY_LARGA",
+        QR_LOGIN_USER: "wa-user-api",
+        QR_LOGIN_PASS: "cambia-esto",
+        COOKIE_SECRET: "clave-super-secreta-y-larga"
+      }
+    }
+  ]
+}
+
+2.3 Arrancar con PM2
+pm2 start ecosystem.config.js --only whatsapp-api --update-env
+pm2 save
 pm2 status
 pm2 logs whatsapp-api
 
-# 3.4 Reiniciar / detener / borrar
-pm2 restart whatsapp-api
-pm2 stop whatsapp-api
-pm2 delete whatsapp-api
+2.4 Probar en producción
 
-# 3.5 Persistir tras reinicio del VPS
+Health: http://TU_IP:3002/health
+
+Login QR: http://TU_IP:3002/login → luego /qr-view
+
+Estado con API key:
+
+curl -H "X-API-Key: TU_API_KEY" http://TU_IP:3002/api/status
+
+2.5 Mantener tras reinicio del VPS
+pm2 startup           # sigue las instrucciones
 pm2 save
-pm2 startup   # sigue las instrucciones que imprime
 
-4) Probar la API en el VPS (PM2 en 3002 según tu ecosystem)
-# 4.1 Health (sin API key)
-curl http://TU_IP_O_DOMINIO:3002/health
+2.6 Actualizar desde Git
+cd /ruta/a/API-Whatsapp
+git fetch origin
+git pull --rebase origin main   # si muestra conflictos, resuélvelos o usa merge
+pnpm install
+pm2 restart whatsapp-api --update-env
 
-# 4.2 Estado
-curl -H "X-API-Key: TU_API_KEY" http://TU_IP_O_DOMINIO:3002/api/status
+🔁 Flujo de activación / restablecimiento
 
-# 4.3 QR en JSON
-curl -H "X-API-Key: TU_API_KEY" http://TU_IP_O_DOMINIO:3002/api/qr
+Primera vez:
 
-# 4.4 Enviar mensaje
-curl -X POST http://TU_IP_O_DOMINIO:3002/api/send \
-  -H "X-API-Key: TU_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"to":"51907690125","message":"Hola desde VPS!"}'
+Abres /login, entras y ves /qr-view.
 
-5) Limpieza en producción (VPS)
-# 5.1 Parar y borrar en PM2 (libera puerto y memoria)
+Escaneas el QR → conectado.
+
+Sesión activa:
+
+/qr-view te indicará que ya hay sesión activa (no muestra QR).
+
+Forzar nuevo QR:
+
+API: POST /api/logout (con API key), o
+
+Borrar sesión y reiniciar (ver limpieza).
+
+Vincular de nuevo: vuelve al login y repite.
+
+🧹 Limpieza / Restablecimiento
+Opción A) Script incluido
+pnpm run cleanup
+# borra: ./auth_info_baileys, qr-code.png, *.log
+# e intenta matar procesos locales relacionados
+
+Opción B) Manual
 pm2 stop whatsapp-api 2>/dev/null || true
 pm2 delete whatsapp-api 2>/dev/null || true
 pm2 flush
 
-# 5.2 Borrar sesión y archivos (nuevo QR al iniciar)
 rm -rf ./auth_info_baileys
 rm -f ./qr-code.png
 find . -maxdepth 1 -type f -name "*.log" -delete
 
-# 5.3 Volver a levantar
-pm2 start ecosystem.config.js
+pm2 start ecosystem.config.js --only whatsapp-api --update-env
 pm2 logs whatsapp-api
 
-6) Puertos ocupados (debug)
-# Ver quién usa el puerto (ej: 3000 o 3002)
-lsof -nP -iTCP:3000 -sTCP:LISTEN
-lsof -nP -iTCP:3002 -sTCP:LISTEN
+🔐 Autenticación y seguridad
 
-# Matar por PID
+API Key (cabecera X-API-Key) para endpoints sensibles: /api/status, /api/send, /api/messages, /api/logout.
+
+Login por cookie para ver el QR: /login → /qr-view y /api/qr.
+
+Nunca subas tu .env a Git.
+.gitignore ya incluye:
+
+node_modules/
+.env
+auth_info_baileys/
+qr-code.png
+*.log
+
+
+Usa HTTPS en producción (Nginx reverse proxy recomendado). Si usas HTTPS, añade Secure a la cookie (ver código Set-Cookie).
+
+📚 Endpoints (documentación)
+Método	Ruta	Auth	Descripción
+GET	/health	❌	Estado básico del servicio
+GET	/login	❌	Formulario de login para ver el QR
+POST	/login	❌	Envía { user, pass } y crea cookie de sesión
+GET	/qr-view	✅ Cookie	Vista HTML con la imagen del QR (auto-refresh)
+GET	/api/qr	✅ Cookie	QR en JSON o ?format=image (PNG)
+GET	/api/status	✅ API Key	{ status, isConnected, qrAvailable }
+POST	/api/send	✅ API Key	Envía un mensaje: { to, message } (usar número internacional, sin +)
+GET	/api/messages	✅ API Key	Últimos mensajes recibidos: ?limit=50
+POST	/api/logout	✅ API Key	Cierra sesión de WhatsApp y regenera QR al reiniciar
+GET	/logout	✅ Cookie	Cierra la sesión web (cookie) para el acceso al QR
+Ejemplos (producción puerto 3002)
+# Health (público)
+curl http://TU_IP:3002/health
+
+# Estado (API Key)
+curl -H "X-API-Key: TU_API_KEY" http://TU_IP:3002/api/status
+
+# Enviar mensaje (API Key)
+curl -X POST http://TU_IP:3002/api/send \
+  -H "X-API-Key: TU_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"to":"51907690125","message":"Hola desde VPS!"}'
+
+🛠️ Troubleshooting
+
+No veo QR: asegúrate de usar /login → /qr-view. Si el estado es connected, primero haz POST /api/logout (API Key).
+
+Puerto en uso:
+
+lsof -nP -iTCP:3002 -sTCP:LISTEN
 kill -9 <PID>
 
-7) Enviar varios mensajes (mini bulk desde bash)
-for n in 51911111111 51922222222 51933333333; do
-  curl -s -X POST http://localhost:3000/api/send \
-    -H "X-API-Key: TU_API_KEY" \
-    -H "Content-Type: application/json" \
-    -d "{\"to\":\"$n\",\"message\":\"Promo 🔥\"}"
-  echo
-done
 
-8) Recordatorios rápidos
-# No mezcles PM2 y pnpm run dev al mismo tiempo sobre el mismo archivo
-# Asegura .gitignore:
-#   node_modules/
-#   .env
-#   auth_info_baileys/
-#   qr-code.png
-#   *.log
+Variables de entorno no cargan: revisa pm2 env 0 y reinicia con:
+
+pm2 restart ecosystem.config.js --only whatsapp-api --update-env
+pm2 save
+
+
+Baileys build scripts ignorados por pnpm**:**
+Si lo necesitas, permite builds:
+
+pnpm approve-builds
+pnpm rebuild
+
+      🧰 Comandos útiles (chuleta)
+      # Dev
+      pnpm run dev
+
+      # Limpieza
+      pnpm run cleanup
+
+      # PM2
+      pm2 start ecosystem.config.js --only whatsapp-api --update-env
+      pm2 restart whatsapp-api --update-env
+      pm2 stop whatsapp-api && pm2 delete whatsapp-api
+      pm2 logs whatsapp-api
+      pm2 save
+      pm2 startup
+
+      # Git (actualizar servidor)
+      git fetch origin
+      git pull --rebase origin main
+      pnpm install
+      pm2 restart whatsapp-api --update-env
+
+
+¡Listo! Con esto deberías poder desarrollar, desplegar y operar tu bot sin dolor.
