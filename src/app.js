@@ -167,33 +167,72 @@ class BaileysProvider {
 
       const { state, saveCreds } = await useMultiFileAuthState('./auth_info_baileys');
       
-      // Obtener la versión más reciente de Baileys
-      const { version } = await fetchLatestBaileysVersion();
-      console.log('📦 Usando versión de Baileys:', version.join('.'));
+      // ✅ FIX 1: No forzar versión específica, usar la que detecte Baileys
+      const { version, isLatest } = await fetchLatestBaileysVersion();
+      console.log(`📦 Versión Baileys: ${version.join('.')} ${isLatest ? '(última)' : '(desactualizada)'}`);
 
       this.sock = makeWASocket({
         version,
         auth: state,
         logger,
         printQRInTerminal: false,
+        
+        // ✅ FIX 2: Configuración mejorada para estabilidad
+        browser: ['WhatsApp Bot', 'Chrome', '118.0.0'], // Simular navegador real
+        syncFullHistory: false, // No sincronizar todo el historial
         generateHighQualityLinkPreview: true,
+        markOnlineOnConnect: true, // Marcar como online
+        
+        // ✅ FIX 3: Configuración de red más permisiva
+        connectTimeoutMs: 60000, // 60 segundos timeout
+        defaultQueryTimeoutMs: 60000,
+        keepAliveIntervalMs: 30000, // Keep-alive cada 30s
+        
+        // ✅ FIX 4: Reintentos automáticos
+        retryRequestDelayMs: 250,
+        maxMsgRetryCount: 5,
+        
+        // ✅ FIX 5: Manejo de mensajes
+        getMessage: async (key) => {
+          // Buscar mensaje en historial
+          const msg = this.messageHistory.find(m => m.id === key.id);
+          return msg || undefined;
+        }
       });
 
       this.sock.ev.on('creds.update', saveCreds);
 
       this.sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect, qr } = update;
+        const { connection, lastDisconnect, qr, isNewLogin } = update;
+
+        // ✅ Diagnóstico mejorado
+        console.log('📊 Estado conexión:', {
+          connection,
+          isNewLogin,
+          statusCode: lastDisconnect?.error?.output?.statusCode,
+          error: lastDisconnect?.error?.message
+        });
 
         if (qr) {
           connectionStatus = 'qr_ready';
           reconnectAttempts = 0;
-          console.log('📱 QR generado - escanéalo en 60s');
+          console.log('📱 QR generado - escanéalo AHORA (60s)');
+          
           try {
             qrCodeData = await qrcode.toDataURL(qr);
             await qrcode.toFile('./qr-code.png', qr);
+            console.log('✅ QR guardado en ./qr-code.png');
           } catch (err) {
-            console.error('Error generando QR:', err);
+            console.error('❌ Error generando QR:', err);
           }
+
+          // Auto-limpiar QR expirado
+          setTimeout(() => {
+            if (connectionStatus === 'qr_ready') {
+              console.log('⏰ QR expiró - genera uno nuevo');
+              qrCodeData = null;
+            }
+          }, 60000);
         }
 
         if (connection === 'close') {
@@ -204,28 +243,55 @@ class BaileysProvider {
           const statusCode = lastDisconnect?.error?.output?.statusCode;
           const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
+          // ✅ Diagnóstico detallado de errores
+          console.log('🔴 Conexión cerrada. Razón:', {
+            statusCode,
+            reason: this.getDisconnectReason(statusCode),
+            shouldReconnect
+          });
+
           if (statusCode === DisconnectReason.loggedOut) {
-            console.log('🚪 Sesión cerrada por usuario');
+            console.log('🚪 Sesión cerrada - limpia auth y reconecta');
             reconnectAttempts = 0;
+          } else if (statusCode === DisconnectReason.restartRequired) {
+            console.log('🔄 Reinicio requerido - reconectando...');
+            setTimeout(() => this.connect(), 2000);
+          } else if (statusCode === DisconnectReason.connectionLost) {
+            console.log('📡 Conexión perdida - reconectando...');
+            setTimeout(() => this.connect(), 3000);
+          } else if (statusCode === DisconnectReason.badSession) {
+            console.log('⚠️ Sesión inválida - LIMPIA ./auth_info_baileys');
+            // No reconectar automáticamente con sesión mala
+          } else if (statusCode === DisconnectReason.timedOut) {
+            console.log('⏰ Timeout - verifica tu conexión a internet');
+            setTimeout(() => this.connect(), 5000);
           } else if (shouldReconnect) {
             reconnectAttempts++;
             if (reconnectAttempts <= MAX_RECONNECT_ATTEMPTS) {
               const delay = Math.min(5000 * reconnectAttempts, 30000);
-              console.log(`🔄 Reconectando en ${delay/1000}s (intento ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
+              console.log(`🔄 Reconectando en ${delay/1000}s (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
               setTimeout(() => this.connect(), delay);
             } else {
-              console.log('❌ Max reconexiones alcanzado. Limpia la sesión con POST /api/logout');
+              console.log('❌ Max reconexiones. Limpia sesión: POST /api/logout');
             }
           }
+        } else if (connection === 'connecting') {
+          console.log('🔄 Conectando al servidor de WhatsApp...');
         } else if (connection === 'open') {
           this.isConnected = true;
           connectionStatus = 'connected';
           qrCodeData = null;
           reconnectAttempts = 0;
-          console.log('✅ WhatsApp conectado!');
+          console.log('✅ WhatsApp conectado exitosamente!');
+          
+          // Obtener info del número conectado
+          if (this.sock.user) {
+            console.log('📱 Número conectado:', this.sock.user.id);
+          }
         }
       });
 
+      // ✅ Manejo mejorado de mensajes
       this.sock.ev.on('messages.upsert', (m) => {
         const msg = m.messages?.[0];
         if (!msg?.key || msg.key.fromMe) return;
@@ -248,18 +314,51 @@ class BaileysProvider {
 
         console.log(`📨 ${entry.name}: "${text}"`);
       });
+
+      // ✅ Manejo de errores del socket
+      this.sock.ev.on('connection.error', (err) => {
+        console.error('❌ Error de conexión:', err.message);
+      });
+
     } catch (e) {
       console.error('❌ Error conectando:', e.message);
+      console.error('Stack:', e.stack);
       connectionStatus = 'error';
       reconnectAttempts++;
+      
       if (reconnectAttempts <= MAX_RECONNECT_ATTEMPTS) {
+        console.log(`🔄 Reintentando en 5s (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
         setTimeout(() => this.connect(), 5000);
+      } else {
+        console.log('❌ Demasiados errores. Reinicia manualmente.');
       }
     }
   }
 
+  // ✅ Helper para diagnosticar razones de desconexión
+  getDisconnectReason(code) {
+    const reasons = {
+      400: 'Bad Request - Sesión inválida',
+      401: 'Unauthorized - Token expirado',
+      403: 'Forbidden - Número bloqueado',
+      404: 'Not Found - Endpoint no encontrado',
+      408: 'Timeout - Sin respuesta del servidor',
+      411: 'Multi-device mismatch',
+      428: 'Connection closed - Escanea QR de nuevo',
+      440: 'Logged out - Sesión cerrada',
+      500: 'Internal Error - Error del servidor WA',
+      503: 'Service Unavailable - Servidor caído',
+      515: 'Restart Required - Reconexión necesaria',
+      516: 'Connection Lost - Red perdida',
+    };
+    return reasons[code] || `Código desconocido: ${code}`;
+  }
+
   async sendMessage(to, message) {
-    if (!this.sock || !this.isConnected) throw new Error('WhatsApp no está conectado');
+    if (!this.sock || !this.isConnected) {
+      throw new Error('WhatsApp no está conectado');
+    }
+    
     const jid = to.includes('@s.whatsapp.net') ? to : `${to}@s.whatsapp.net`;
     await this.sock.sendMessage(jid, { text: message });
     console.log(`📤 Mensaje enviado a ${to}`);
@@ -267,7 +366,10 @@ class BaileysProvider {
   }
 
   async sendPdf(to, pdfBuffer, filename, caption) {
-    if (!this.sock || !this.isConnected) throw new Error('WhatsApp no está conectado');
+    if (!this.sock || !this.isConnected) {
+      throw new Error('WhatsApp no está conectado');
+    }
+    
     const jid = to.includes('@s.whatsapp.net') ? to : `${to}@s.whatsapp.net`;
     await this.sock.sendMessage(jid, {
       document: pdfBuffer,
@@ -279,7 +381,9 @@ class BaileysProvider {
     return true;
   }
 
-  getMessageHistory() { return this.messageHistory; }
+  getMessageHistory() { 
+    return this.messageHistory; 
+  }
 }
 
 // ---- init bot ----

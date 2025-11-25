@@ -6,7 +6,7 @@ module.exports = {
       watch: false,
       env: {
         NODE_ENV: "production",
-        PORT: "3002",
+        PORT: "3005",
         API_KEY: "22c746590447e7311801c22c4d53736d569843ebf6da3cf8498354399fe2f2e2",
                 QR_LOGIN_USER: "wa-user-api",
         QR_LOGIN_PASS: "rollingcode",
