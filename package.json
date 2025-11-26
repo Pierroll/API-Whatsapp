@@ -20,7 +20,7 @@
     "@bot-whatsapp/bot": "^0.1.38",
     "@bot-whatsapp/database": "0.1.38",
     "@bot-whatsapp/provider-baileys": "0.1.0-alpha.18",
-    "@whiskeysockets/baileys": "^6.7.20",
+    "@whiskeysockets/baileys": "7.0.0-rc.9",
     "baileys": "6.7.20",
     "body-parser": "^2.2.0",
     "dotenv": "^17.2.2",
