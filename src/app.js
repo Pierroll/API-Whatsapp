@@ -294,7 +294,7 @@ class BaileysProvider {
       // ✅ Manejo mejorado de mensajes
       this.sock.ev.on('messages.upsert', (m) => {
         const msg = m.messages?.[0];
-        if (!msg?.key || msg.key.fromMe) return;
+        if (!msg?.key || msg.key.fromMe || msg.key.remoteJid === 'status@broadcast') return;
 
         const text =
           msg.message?.conversation ||
